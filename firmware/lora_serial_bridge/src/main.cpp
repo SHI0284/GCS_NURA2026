@@ -155,15 +155,15 @@ constexpr unsigned long kSerialBaud = 115200UL;
 #if defined(NURA_DEV_SX1278)
 constexpr long kLoraFrequencyHz = 433000000L;
 constexpr uint32_t kLoraSpiFrequencyHz = 125000UL;
-constexpr int kLoraTxPowerDbm = 10;
+constexpr int kLoraTxPowerDbm = 2;
 #elif defined(NURA_SPARKFUN_1W_SX1276) || defined(NURA_GROUND_SX1276_LEGACY_SPI0)
-constexpr long kLoraFrequencyHz = 920900000L;
+constexpr long kLoraFrequencyHz = 922300000L;
 constexpr uint32_t kLoraSpiFrequencyHz = 250000UL;
-constexpr int kLoraTxPowerDbm = 10;
+constexpr int kLoraTxPowerDbm = 2;
 #else
-constexpr long kLoraFrequencyHz = 920900000L;
+constexpr long kLoraFrequencyHz = 922300000L;
 constexpr uint32_t kLoraSpiFrequencyHz = 8000000UL;
-constexpr int kLoraTxPowerDbm = 17;
+constexpr int kLoraTxPowerDbm = 2;
 #endif
 constexpr int kLoraSpreadingFactor = 7;
 constexpr long kLoraSignalBandwidthHz = 125000L;
