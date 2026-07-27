@@ -820,9 +820,30 @@ def telemetry_reset():
     if uplink is not None and uplink.simulate:
         telemetry.reset()
         log_path = None if telemetry.logger is None else telemetry.logger.path
+        avionics_reset = uplink.reset_fsm()
     else:
+        if uplink is not None and uplink.is_open() and avionics_downlink_only() is True:
+            return jsonify({
+                "ok": False,
+                "message": (
+                    "Avionics firmware is downlink-only. Upload the bench reset "
+                    "uplink firmware before resetting the flight state machine from GCS."
+                ),
+            }), 409
+        avionics_reset = uplink.reset_fsm() if uplink is not None and uplink.is_open() else None
         log_path = hardware_telemetry.reset()
-    return jsonify({"ok": True, "log": log_path})
+    if avionics_reset is not None and not avionics_reset.success:
+        return jsonify({
+            "ok": False,
+            "log": log_path,
+            "avionics_reset": avionics_reset.to_dict(),
+            "message": avionics_reset.message,
+        }), 502
+    return jsonify({
+        "ok": True,
+        "log": log_path,
+        "avionics_reset": None if avionics_reset is None else avionics_reset.to_dict(),
+    })
 
 
 @app.route("/api/telemetry/status", methods=["GET"])

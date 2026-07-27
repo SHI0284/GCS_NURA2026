@@ -57,6 +57,7 @@ CONTROL_ACK = 0x81
 COMMAND_FORCE_DEPLOY_RECOVERY = 0x01
 COMMAND_ABORT_PROPULSION_DEPRECATED = 0x02   # 더 이상 지원 안 함(로켓이 REJECT 함)
 COMMAND_SET_TELEMETRY_PROFILE = 0x03
+COMMAND_BENCH_RESET_FSM = 0x7E
 
 # AckStage  ── 로켓이 보내주는 ACK의 단계
 ACK_RECEIVED = 0
@@ -566,6 +567,29 @@ def build_force_deploy_frame(command_seq: int, frame_seq: int, nonce: int,
         nonce=nonce,
         valid_until_ms=0,     # 0 = 만료 검사 안 함
         param0=0,             # ★ 반드시 0 (0이 아니면 로켓이 거부함)
+        param1=0,
+    )
+    control.auth_or_ack = make_control_auth_tag(control, frame_seq, key)
+    payload = control.encode()
+    return encode_frame(MESSAGE_CONTROL, frame_seq, payload,
+                        vehicle_id=vehicle_id,
+                        direction=FRAME_DIRECTION_UPLINK,
+                        key=key)
+
+
+def build_bench_reset_fsm_frame(command_seq: int, frame_seq: int, nonce: int,
+                                key: bytes = AUTH_KEY,
+                                vehicle_id: int = VEHICLE_ID) -> bytes:
+    """
+    Bench-only FSM reset command. Flight avionics builds reject this command.
+    """
+    control = ControlPayload(
+        subtype=CONTROL_CMD,
+        command_id=COMMAND_BENCH_RESET_FSM,
+        command_seq=command_seq,
+        nonce=nonce,
+        valid_until_ms=0,
+        param0=0,
         param1=0,
     )
     control.auth_or_ack = make_control_auth_tag(control, frame_seq, key)

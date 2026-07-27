@@ -2344,7 +2344,15 @@ function toggleStream() {
 
 function resetAll() {
   fetch('/api/telemetry/reset', { method: 'POST' })
-    .finally(() => location.reload());
+    .then(async (resp) => {
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok || data.ok === false) {
+        showToast('Reset Failed', data.message || 'Avionics FSM reset was not accepted.', true);
+        return;
+      }
+      location.reload();
+    })
+    .catch((err) => showToast('Reset Failed', err.message, true));
 }
 
 function toggleTrack() {
