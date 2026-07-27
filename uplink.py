@@ -280,6 +280,13 @@ class PyroUplink:
         with self._lock:                # 버튼 연타 등 동시 호출 방어
             return self._force_deploy_locked(timeout_s)
 
+    def reset_fsm(self, timeout_s: float = 3.0) -> DeployResult:
+        """
+        Bench-only FSM reset command. The avionics flight build rejects this.
+        """
+        with self._lock:
+            return self._reset_fsm_locked(timeout_s)
+
     def _force_deploy_locked(self, timeout_s: float) -> DeployResult:
         result = DeployResult()
 
@@ -322,6 +329,70 @@ class PyroUplink:
                                            self.auth_key,
                                            self.vehicle_id)
 
+        return self._send_command_frame_locked(
+            frame,
+            command_seq,
+            nonce,
+            p.COMMAND_FORCE_DEPLOY_RECOVERY,
+            timeout_s,
+            "recovery 실행 ACK 확인",
+        )
+
+    def _reset_fsm_locked(self, timeout_s: float) -> DeployResult:
+        result = DeployResult()
+
+        if not self.is_open():
+            result.message = "시리얼 포트가 안 열려 있음. open() 먼저 호출해줘."
+            return result
+
+        if not self.simulate and self.serial_mode != "raw":
+            result.message = "텍스트 receiver 펌웨어에서는 PC FSM reset 업링크를 지원하지 않음. raw bridge를 업로드해줘."
+            return result
+
+        if not self.simulate and self._bridge_status.get("radio") == "failed":
+            result.message = "지상국 LoRa 브리지의 radio 초기화가 실패해서 명령을 보내지 않음."
+            return result
+
+        command_seq = self._next_command_seq
+        self._next_command_seq = (self._next_command_seq + 1) & 0xFFFF
+        frame_seq = self._next_frame_seq
+        self._next_frame_seq = (self._next_frame_seq + 1) & 0xFFFF
+        nonce = self._make_nonce(command_seq)
+        result.command_seq = command_seq
+
+        if self.simulate:
+            time.sleep(0.2)
+            result.success = True
+            result.stage = p.ACK_EXECUTED
+            result.result = p.RESULT_OK
+            result.reason = p.REJECT_NONE
+            result.flight_state = p.FLIGHT_SAFE
+            result.attempts = 1
+            result.message = "[시뮬레이션] FSM reset 실행 완료 (EXECUTED/OK)"
+            result.acks = ["[SIM] stage=ACCEPTED result=OK", "[SIM] stage=EXECUTED result=OK"]
+            return result
+
+        frame = p.build_bench_reset_fsm_frame(command_seq,
+                                              frame_seq,
+                                              nonce,
+                                              self.auth_key,
+                                              self.vehicle_id)
+
+        result = self._send_command_frame_locked(
+            frame,
+            command_seq,
+            nonce,
+            p.COMMAND_BENCH_RESET_FSM,
+            timeout_s,
+            "FSM reset ACK 확인",
+        )
+        return result
+
+    def _send_command_frame_locked(self, frame: bytes, command_seq: int, nonce: int,
+                                   command_id: int, timeout_s: float,
+                                   success_prefix: str) -> DeployResult:
+        result = DeployResult()
+        result.command_seq = command_seq
         deadline = time.monotonic() + timeout_s
         last_tx = 0.0
         attempts = 0
@@ -358,7 +429,7 @@ class PyroUplink:
                 # 나중에 소비하도록 보존한다.
                 self._pending_frames.extend(parsed_frames)
                 for parsed in parsed_frames:
-                    ack = self._handle_frame(parsed, command_seq, nonce)
+                    ack = self._handle_frame(parsed, command_id, command_seq, nonce)
                     if ack is None:
                         continue
                     stage, res, reason, fstate = ack
@@ -377,7 +448,7 @@ class PyroUplink:
                     if stage == p.ACK_EXECUTED and res == p.RESULT_OK:
                         result.success = True
                         result.message = (
-                            f"recovery 실행 ACK 확인 (EXECUTED/OK, {attempts}회 송신)"
+                            f"{success_prefix} (EXECUTED/OK, {attempts}회 송신)"
                         )
                         return result
 
@@ -414,7 +485,8 @@ class PyroUplink:
             )
         return result
 
-    def _handle_frame(self, frame: p.ParsedFrame, expected_seq: int, expected_nonce: int):
+    def _handle_frame(self, frame: p.ParsedFrame, expected_command_id: int,
+                      expected_seq: int, expected_nonce: int):
         """
         받은 프레임이 우리가 기다리는 ACK 인지 확인.
         맞으면 (stage, result, reason, flight_state) 튜플, 아니면 None.
@@ -428,7 +500,7 @@ class PyroUplink:
             return None
         if ctrl.subtype != p.CONTROL_ACK:
             return None
-        if ctrl.command_id != p.COMMAND_FORCE_DEPLOY_RECOVERY:
+        if ctrl.command_id != expected_command_id:
             return None
         if ctrl.command_seq != expected_seq:
             return None      # 다른 명령에 대한 ACK
