@@ -57,6 +57,7 @@ CONTROL_ACK = 0x81
 COMMAND_FORCE_DEPLOY_RECOVERY = 0x01
 COMMAND_ABORT_PROPULSION_DEPRECATED = 0x02   # 더 이상 지원 안 함(로켓이 REJECT 함)
 COMMAND_SET_TELEMETRY_PROFILE = 0x03
+COMMAND_ARM_FLIGHT = 0x04
 COMMAND_BENCH_RESET_FSM = 0x7E
 
 # AckStage  ── 로켓이 보내주는 ACK의 단계
@@ -575,6 +576,43 @@ def build_force_deploy_frame(command_seq: int, frame_seq: int, nonce: int,
                         vehicle_id=vehicle_id,
                         direction=FRAME_DIRECTION_UPLINK,
                         key=key)
+
+
+def build_arm_flight_frame(command_seq: int, frame_seq: int, nonce: int,
+                           valid_until_ms: int,
+                           key: bytes = AUTH_KEY,
+                           vehicle_id: int = VEHICLE_ID) -> bytes:
+    """Build an authenticated, expiring SAFE -> ARMED command frame.
+
+    The fixed 24-byte CONTROL payload has no unused trailing bytes.  The two
+    existing signed parameters therefore carry the transition contract:
+    ``param0=FLIGHT_SAFE`` is the state the operator observed and
+    ``param1=FLIGHT_ARMED`` is the only requested target.  Both values and the
+    expiry are covered by the control SipHash tag.
+
+    ``valid_until_ms=0`` is deliberately rejected for ARM commands.  Avionics
+    must compare this value with its own boot clock using wrap-safe arithmetic.
+    """
+    if not 1 <= valid_until_ms <= 0xFFFFFFFF:
+        raise ValueError("ARM valid_until_ms must be a non-zero u32 boot timestamp")
+    control = ControlPayload(
+        subtype=CONTROL_CMD,
+        command_id=COMMAND_ARM_FLIGHT,
+        command_seq=command_seq,
+        nonce=nonce,
+        valid_until_ms=valid_until_ms,
+        param0=FLIGHT_SAFE,
+        param1=FLIGHT_ARMED,
+    )
+    control.auth_or_ack = make_control_auth_tag(control, frame_seq, key)
+    return encode_frame(
+        MESSAGE_CONTROL,
+        frame_seq,
+        control.encode(),
+        vehicle_id=vehicle_id,
+        direction=FRAME_DIRECTION_UPLINK,
+        key=key,
+    )
 
 
 def build_bench_reset_fsm_frame(command_seq: int, frame_seq: int, nonce: int,

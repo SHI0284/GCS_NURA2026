@@ -24,6 +24,14 @@ HTML_FILENAME = "mission_control.html"
 
 app = Flask(__name__)
 uplink: PyroUplink | None = None
+arm_request_lock = threading.Lock()
+
+ARM_CONFIRM_TOKEN = "ARM"
+# Avionics FAST telemetry is nominally emitted every 200 ms and declares
+# sensor data stale at 1500 ms.  Refuse to arm from an older state snapshot.
+ARM_TELEMETRY_MAX_AGE_S = 1.5
+# Eight 250 ms retransmissions fit inside this avionics boot-clock deadline.
+ARM_COMMAND_VALIDITY_MS = 3000
 
 FLIGHT_STATE_NAMES = {
     p.FLIGHT_INIT: "INIT",
@@ -53,8 +61,14 @@ def avionics_downlink_only() -> bool | None:
             source = handle.read()
     except OSError:
         return None
-    match = re.search(r"\bkFlightDownlinkOnly\s*=\s*(true|false)\s*;", source)
-    return None if match is None else match.group(1) == "true"
+    matches = re.findall(r"\bkFlightDownlinkOnly\s*=\s*(true|false)\s*;", source)
+    if not matches:
+        return None
+    # A source file may contain both sides of a preprocessor branch.  Without
+    # the exact avionics build flags GCS cannot prove the permissive branch was
+    # compiled, so mixed values must fail closed.  An explicit environment
+    # override above remains the authoritative runtime/build declaration.
+    return "true" in matches
 
 
 class TelemetryLogger:
@@ -117,6 +131,7 @@ class TelemetrySimulator:
         self.lock = threading.Lock()
         self.logger: TelemetryLogger | None = None
         self.index = 0
+        self.armed = False
         self.launch_site = (34.4258, 127.5211)
         self.apogee_pos: tuple[float, float] | None = None
 
@@ -126,7 +141,33 @@ class TelemetrySimulator:
                 self.logger.close()
             self.logger = TelemetryLogger()
             self.index = 0
+            self.armed = False
             self.apogee_pos = None
+
+    def arm(self) -> None:
+        with self.lock:
+            self.armed = True
+            # t=0.6 s maps to the existing ARMED visualization interval.
+            self.index = max(self.index, 3)
+
+    def state_code(self) -> int:
+        with self.lock:
+            if not self.armed:
+                return p.FLIGHT_SAFE
+            t = self.index * 0.2
+            if t < 1.0:
+                return p.FLIGHT_ARMED
+            if t <= 2.41:
+                return p.FLIGHT_LAUNCH
+            if t <= 10.11:
+                return p.FLIGHT_COAST
+            if t <= 11.14:
+                return p.FLIGHT_APOGEE
+            if t <= 25.23:
+                return p.FLIGHT_DROGUE
+            if t <= 43.0:
+                return p.FLIGHT_DEPLOY
+            return p.FLIGHT_GROUND
 
     def close(self) -> None:
         with self.lock:
@@ -138,8 +179,9 @@ class TelemetrySimulator:
         with self.lock:
             if self.logger is None:
                 self.logger = TelemetryLogger()
-            row = self._generate_point(self.index)
-            self.index += 1
+            row = self._generate_point(self.index if self.armed else 0)
+            if self.armed:
+                self.index += 1
             self.logger.log(row)
             return row
 
@@ -253,6 +295,7 @@ class HardwareTelemetry:
         self.last_fast_payload_hex = ""
         self.last_gps_payload_hex = ""
         self.last_packet_at: float | None = None
+        self.last_fast_at: float | None = None
         self.lat = 34.4258
         self.lng = 127.5211
         self.alt = 0.0
@@ -337,6 +380,10 @@ class HardwareTelemetry:
             "baro_alt_agl_m": round(self.baro_alt_agl_m, 2),
             "gps_alt_m": None if self.gps_alt_m is None else round(self.gps_alt_m, 2),
             "last_packet_age_s": age,
+            "last_fast_age_s": (
+                None if self.last_fast_at is None
+                else round(time.monotonic() - self.last_fast_at, 3)
+            ),
             "sequence_gaps": self.sequence_gaps,
             "duplicate_frames": self.duplicate_frames,
             "out_of_order_frames": self.out_of_order_frames,
@@ -381,6 +428,7 @@ class HardwareTelemetry:
                 "last_fast_seq": self.last_fast_seq,
                 "last_gps_seq": self.last_gps_seq,
                 "last_packet_age_s": row["last_packet_age_s"],
+                "last_fast_age_s": row["last_fast_age_s"],
                 "sequence_gaps": self.sequence_gaps,
                 "duplicate_frames": self.duplicate_frames,
                 "out_of_order_frames": self.out_of_order_frames,
@@ -518,6 +566,7 @@ class HardwareTelemetry:
         self.last_fast_seq = seq
         self.last_fast_payload_hex = line
         self.last_packet_at = time.monotonic()
+        self.last_fast_at = self.last_packet_at
         self.state = match.group("state")
         self.state_code = int(match.group("state_code"))
         self.status_word = match.group("status")
@@ -647,6 +696,7 @@ class HardwareTelemetry:
         self.last_fast_seq = seq
         self.last_fast_payload_hex = payload.hex(" ")
         self.last_packet_at = time.monotonic()
+        self.last_fast_at = self.last_packet_at
         self.state_code = state_code
         self.state = FLIGHT_STATE_NAMES.get(state_code, f"UNKNOWN({state_code})")
         self.status_word = f"0x{status_word:04X}"
@@ -851,6 +901,168 @@ def telemetry_status():
     status = hardware_telemetry.status(uplink)
     status["reader"] = hardware_reader.status()
     return jsonify(status)
+
+
+def flight_arm_status() -> dict:
+    """Return the authoritative GCS-side prerequisites for SAFE -> ARMED."""
+    link = uplink
+    simulate = bool(link is not None and link.simulate)
+    connected = bool(link is not None and link.is_open())
+    downlink_only = avionics_downlink_only()
+    diagnostics = None if link is None or simulate else link.diagnostics()
+    bridge_radio = None if diagnostics is None else diagnostics.get("bridge_status", {}).get("radio")
+
+    if simulate:
+        state_code = telemetry.state_code()
+        last_fast_age_s = 0.0
+        estimated_boot_ms = int(time.monotonic() * 1000) & 0xFFFFFFFF
+    else:
+        with hardware_telemetry.lock:
+            state_code = hardware_telemetry.state_code
+            last_fast_at = hardware_telemetry.last_fast_at
+            last_boot_ms = hardware_telemetry.last_boot_ms
+        last_fast_age_s = (
+            None if last_fast_at is None
+            else max(0.0, time.monotonic() - last_fast_at)
+        )
+        estimated_boot_ms = None
+        if last_boot_ms is not None and last_fast_age_s is not None:
+            estimated_boot_ms = (
+                last_boot_ms + int(round(last_fast_age_s * 1000.0))
+            ) & 0xFFFFFFFF
+
+    blockers: list[dict[str, str]] = []
+
+    def block(code: str, message: str) -> None:
+        blockers.append({"code": code, "message": message})
+
+    if not connected:
+        block("UPLINK_DISCONNECTED", "Ground-station uplink is not connected.")
+    if not simulate:
+        if downlink_only is True:
+            block("DOWNLINK_ONLY", "Avionics kFlightDownlinkOnly=true blocks uplink.")
+        if link is not None and link.serial_mode != "raw":
+            block("RAW_BRIDGE_REQUIRED", "ARM requires the authenticated raw serial bridge.")
+        if not p.RADIO_IDENTITY_PROVISIONED:
+            block(
+                "PUBLIC_BENCH_IDENTITY",
+                "Public bench radio identity is active; provision flight vehicle ID and key.",
+            )
+        if bridge_radio == "failed":
+            block("RADIO_INIT_FAILED", "Ground-station LoRa radio initialization failed.")
+        if last_fast_age_s is None:
+            block("NO_FAST_TELEMETRY", "No authenticated FAST telemetry has been received.")
+        elif last_fast_age_s > ARM_TELEMETRY_MAX_AGE_S:
+            block(
+                "STALE_FAST_TELEMETRY",
+                f"Latest FAST telemetry is {last_fast_age_s:.2f}s old.",
+            )
+        if estimated_boot_ms is None:
+            block("NO_BOOT_CLOCK", "Avionics boot clock is unavailable.")
+
+    if state_code is not None and state_code != p.FLIGHT_SAFE:
+        block(
+            "NOT_SAFE",
+            f"Latest avionics state is {FLIGHT_STATE_NAMES.get(state_code, state_code)}, not SAFE.",
+        )
+    if state_code is None:
+        block("UNKNOWN_STATE", "Authenticated avionics flight state is unknown.")
+
+    valid_until_ms = None
+    if estimated_boot_ms is not None:
+        valid_until_ms = (estimated_boot_ms + ARM_COMMAND_VALIDITY_MS) & 0xFFFFFFFF
+        # Zero means "no expiry" to legacy command handlers.  At the single
+        # wrap instant where the calculation is zero, timestamp 1 is the
+        # equivalent near-future wrap-safe deadline without disabling expiry.
+        if valid_until_ms == 0:
+            valid_until_ms = 1
+
+    eligible = not blockers and valid_until_ms is not None
+    return {
+        "eligible": eligible,
+        "connected": connected,
+        "simulate": simulate,
+        "serial_mode": None if link is None else link.serial_mode,
+        "bridge_radio": bridge_radio,
+        "identity_provisioned": simulate or p.RADIO_IDENTITY_PROVISIONED,
+        "avionics_downlink_only": downlink_only,
+        "state": FLIGHT_STATE_NAMES.get(state_code, "UNKNOWN"),
+        "state_code": state_code,
+        "expected_state": "SAFE",
+        "expected_state_code": p.FLIGHT_SAFE,
+        "target_state": "ARMED",
+        "target_state_code": p.FLIGHT_ARMED,
+        "last_fast_age_s": (
+            None if last_fast_age_s is None else round(last_fast_age_s, 3)
+        ),
+        "max_fast_age_s": ARM_TELEMETRY_MAX_AGE_S,
+        "command_validity_ms": ARM_COMMAND_VALIDITY_MS,
+        "valid_until_ms": valid_until_ms,
+        "blockers": blockers,
+        "message": (
+            "ARM ready: authenticated latest state is SAFE."
+            if eligible else " ".join(item["message"] for item in blockers)
+        ),
+    }
+
+
+@app.route("/api/flight/arm/status", methods=["GET"])
+def flight_arm_status_api():
+    return jsonify(flight_arm_status())
+
+
+@app.route("/api/flight/arm", methods=["POST"])
+def flight_arm():
+    data = request.get_json(silent=True) or {}
+    if data.get("confirm") != ARM_CONFIRM_TOKEN or data.get("expected_state") != p.FLIGHT_SAFE:
+        return jsonify({
+            "success": False,
+            "message": 'Explicit confirmation required: {"confirm":"ARM","expected_state":1}',
+        }), 400
+
+    if not arm_request_lock.acquire(blocking=False):
+        return jsonify({
+            "success": False,
+            "message": "Another ARM request is already in progress.",
+        }), 409
+
+    try:
+        status = flight_arm_status()
+        if not status["eligible"]:
+            return jsonify({
+                "success": False,
+                "message": status["message"],
+                "arm_status": status,
+            }), 409
+
+        link = uplink
+        if link is None or status["valid_until_ms"] is None:
+            return jsonify({
+                "success": False,
+                "message": "ARM prerequisites changed before transmission.",
+            }), 409
+
+        result = link.arm_flight(status["valid_until_ms"])
+        payload = result.to_dict()
+        payload.update({
+            "command": "ARM_FLIGHT",
+            "command_id": p.COMMAND_ARM_FLIGHT,
+            "expected_state": p.FLIGHT_SAFE,
+            "target_state": p.FLIGHT_ARMED,
+            "valid_until_ms": status["valid_until_ms"],
+        })
+        # Fail closed even if a future transport implementation accidentally
+        # marks a mismatched EXECUTED ACK successful.
+        payload["success"] = bool(
+            result.success and result.flight_state == p.FLIGHT_ARMED
+        )
+        if payload["success"] and link.simulate:
+            telemetry.arm()
+        if not payload["success"] and result.success:
+            payload["message"] = "ARM ACK did not report final state ARMED."
+        return jsonify(payload), 200 if payload["success"] else 502
+    finally:
+        arm_request_lock.release()
 
 
 @app.route("/api/pyro/deploy", methods=["POST"])

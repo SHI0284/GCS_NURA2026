@@ -2,7 +2,7 @@
 """
 nura/uplink.py
 ==============
-강제 사출(FORCE_DEPLOY) 명령을 LoRa 로 쏴 보내는 업링크 모듈.
+인증된 비행 제어 명령을 LoRa 로 쏴 보내는 업링크 모듈.
 
 [전체 통신 경로]
 
@@ -56,7 +56,7 @@ COMMAND_MAX_ATTEMPTS = 8            # kCommandMaxAttempts = 8
 SERIAL_BAUD = 115200                # kSerialBaud
 
 class DeployResult:
-    """강제 사출 명령의 최종 결과."""
+    """인증된 CONTROL 명령의 최종 결과(기존 API 이름 호환 유지)."""
 
     def __init__(self):
         self.success = False          # EXECUTED + OK 로 끝났는가
@@ -85,7 +85,7 @@ class DeployResult:
 
 class PyroUplink:
     """
-    LoRa 강제 사출 업링크.
+    LoRa 비행 제어 업링크.
 
     사용 예:
         up = PyroUplink(port="/dev/ttyACM1", serial_mode="raw")
@@ -287,6 +287,11 @@ class PyroUplink:
         with self._lock:
             return self._reset_fsm_locked(timeout_s)
 
+    def arm_flight(self, valid_until_ms: int, timeout_s: float = 3.0) -> DeployResult:
+        """Send one expiring SAFE -> ARMED request and require an ARMED ACK."""
+        with self._lock:
+            return self._arm_flight_locked(valid_until_ms, timeout_s)
+
     def _force_deploy_locked(self, timeout_s: float) -> DeployResult:
         result = DeployResult()
 
@@ -336,6 +341,59 @@ class PyroUplink:
             p.COMMAND_FORCE_DEPLOY_RECOVERY,
             timeout_s,
             "recovery 실행 ACK 확인",
+        )
+
+    def _arm_flight_locked(self, valid_until_ms: int, timeout_s: float) -> DeployResult:
+        result = DeployResult()
+
+        if not self.is_open():
+            result.message = "시리얼 포트가 안 열려 있음. open() 먼저 호출해줘."
+            return result
+        if not self.simulate and self.serial_mode != "raw":
+            result.message = "텍스트 receiver 펌웨어에서는 ARM 업링크를 지원하지 않음. raw bridge를 업로드해줘."
+            return result
+        if not self.simulate and self._bridge_status.get("radio") == "failed":
+            result.message = "지상국 LoRa 브리지의 radio 초기화가 실패해서 ARM 명령을 보내지 않음."
+            return result
+        if not 1 <= int(valid_until_ms) <= 0xFFFFFFFF:
+            result.message = "ARM 명령에는 0이 아닌 avionics boot-clock 만료 시간이 필요함."
+            return result
+
+        command_seq = self._next_command_seq
+        self._next_command_seq = (self._next_command_seq + 1) & 0xFFFF
+        frame_seq = self._next_frame_seq
+        self._next_frame_seq = (self._next_frame_seq + 1) & 0xFFFF
+        nonce = self._make_nonce(command_seq)
+        result.command_seq = command_seq
+
+        if self.simulate:
+            time.sleep(0.2)
+            result.success = True
+            result.stage = p.ACK_EXECUTED
+            result.result = p.RESULT_OK
+            result.reason = p.REJECT_NONE
+            result.flight_state = p.FLIGHT_ARMED
+            result.attempts = 1
+            result.message = "[시뮬레이션] SAFE -> ARMED 전이 ACK 확인 (EXECUTED/OK)"
+            result.acks = ["[SIM] stage=ACCEPTED result=OK", "[SIM] stage=EXECUTED result=OK state=ARMED"]
+            return result
+
+        frame = p.build_arm_flight_frame(
+            command_seq,
+            frame_seq,
+            nonce,
+            int(valid_until_ms),
+            self.auth_key,
+            self.vehicle_id,
+        )
+        return self._send_command_frame_locked(
+            frame,
+            command_seq,
+            nonce,
+            p.COMMAND_ARM_FLIGHT,
+            timeout_s,
+            "SAFE -> ARMED 전이 ACK 확인",
+            expected_flight_state=p.FLIGHT_ARMED,
         )
 
     def _reset_fsm_locked(self, timeout_s: float) -> DeployResult:
@@ -390,7 +448,8 @@ class PyroUplink:
 
     def _send_command_frame_locked(self, frame: bytes, command_seq: int, nonce: int,
                                    command_id: int, timeout_s: float,
-                                   success_prefix: str) -> DeployResult:
+                                   success_prefix: str,
+                                   expected_flight_state: int | None = None) -> DeployResult:
         result = DeployResult()
         result.command_seq = command_seq
         deadline = time.monotonic() + timeout_s
@@ -446,6 +505,12 @@ class PyroUplink:
                         got_accepted = True
 
                     if stage == p.ACK_EXECUTED and res == p.RESULT_OK:
+                        if expected_flight_state is not None and fstate != expected_flight_state:
+                            result.message = (
+                                "EXECUTED/OK ACK의 비행 상태가 예상과 다름: "
+                                f"expected={expected_flight_state}, received={fstate}"
+                            )
+                            return result
                         result.success = True
                         result.message = (
                             f"{success_prefix} (EXECUTED/OK, {attempts}회 송신)"
@@ -460,7 +525,22 @@ class PyroUplink:
                         return result
 
                     if stage == p.ACK_DUPLICATE:
-                        # 이미 처리된 명령. 이전에 실행됐다는 뜻.
+                        # 이미 수락 또는 실행 처리 중인 동일 명령.
+                        if res not in {p.RESULT_OK, p.RESULT_ALREADY_DONE}:
+                            result.message = (
+                                "DUPLICATE ACK의 result가 예상과 다름: "
+                                f"{p.result_name(res)}"
+                            )
+                            return result
+                        if expected_flight_state is not None and fstate != expected_flight_state:
+                            # A retry can reach avionics after ACCEPTED but before
+                            # the FSM task has consumed the queued request.  In
+                            # that window DUPLICATE legitimately still reports
+                            # SAFE; keep waiting for the original deferred
+                            # EXECUTED/ARMED ACK instead of declaring success or
+                            # failure from this intermediate ACK.
+                            got_accepted = True
+                            continue
                         result.success = True
                         result.message = "이미 실행된 명령 (DUPLICATE/ALREADY_DONE)"
                         return result

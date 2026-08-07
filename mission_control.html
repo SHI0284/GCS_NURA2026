@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>NURA 2025 — Mission Control</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cpath fill='%230f62fe' d='M32 3 43 27l-5 27-6 7-6-7-5-27z'/%3E%3Ccircle cx='32' cy='26' r='5' fill='%23f4f4f4'/%3E%3C/svg%3E">
 
 <!-- Local, integrity-pinned browser assets (tools/prepare_web_assets.py) -->
 <link rel="stylesheet" href="/static/vendor/leaflet.css"/>
@@ -701,6 +702,14 @@ body {
       SHARE
     </button>
     <div class="header-divider" style="height:24px;"></div>
+    <button class="cds--btn" id="arm-btn" onclick="openArmModal()" disabled style="
+      background:#302400; color:#f1c21b;
+      border:1px solid #f1c21b;
+      font-weight:700; letter-spacing:0.08em;
+      opacity:0.45;
+    " title="Authenticated SAFE telemetry is required">
+      SAFE → ARMED
+    </button>
     <button class="cds--btn" id="eject-btn" onclick="openEjectModal()" style="
       background:#750e13; color:#fa4d56;
       border:1px solid #fa4d56;
@@ -719,6 +728,82 @@ body {
     </button>
 
   </div>
+
+<!-- ─── SAFE -> ARMED 안전 확인 모달 ─── -->
+<div id="arm-modal-overlay" onclick="closeArmModal()" style="
+  display:none; position:fixed; inset:0; z-index:99998;
+  background:rgba(0,0,0,0.75);
+  align-items:center; justify-content:center;
+">
+  <div onclick="event.stopPropagation()" style="
+    background:#161616;
+    border:1px solid #f1c21b;
+    border-top:4px solid #f1c21b;
+    width:500px; max-width:94vw;
+    box-shadow:0 0 60px rgba(241,194,27,0.24);
+    font-family:'IBM Plex Sans',sans-serif;
+    animation:modalIn 0.18s cubic-bezier(.2,0,.38,.9);
+  ">
+    <div style="
+      display:flex; align-items:center; gap:12px;
+      padding:16px 20px; border-bottom:1px solid #393939;
+      background:#241d05;
+    ">
+      <svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+        <path d="M10 2L18 17H2L10 2Z" stroke="#f1c21b" stroke-width="1.5" fill="rgba(241,194,27,0.12)"/>
+        <line x1="10" y1="8" x2="10" y2="12" stroke="#f1c21b" stroke-width="1.5"/>
+        <circle cx="10" cy="14.5" r="0.8" fill="#f1c21b"/>
+      </svg>
+      <span style="font-size:14px;font-weight:700;color:#f1c21b;letter-spacing:0.06em;">
+        SAFE → ARMED 비행 상태 전이
+      </span>
+    </div>
+
+    <div style="padding:24px 24px 20px;">
+      <p style="font-size:15px;font-weight:600;color:#f4f4f4;line-height:1.6;margin-bottom:12px;">
+        이 명령은 에비오닉스를 발사 가능 상태로 전환합니다.
+      </p>
+      <div style="background:#292205;border-left:3px solid #f1c21b;padding:10px 14px;margin-bottom:16px;">
+        <p style="font-size:12px;color:#c6c6c6;line-height:1.6;font-family:'IBM Plex Mono',monospace;">
+          발사대 통제, 인원 퇴거, 연속성 및 비행 절차를 현장 체크리스트에서 먼저 확인하십시오.<br>
+          GCS는 인증된 최신 SAFE 텔레메트리와 ARMED ACK를 모두 검증합니다.
+        </p>
+      </div>
+
+      <p id="arm-status-line" style="min-height:34px;font-size:11px;color:#8d8d8d;font-family:'IBM Plex Mono',monospace;line-height:1.5;margin-bottom:14px;">
+        Checking authenticated avionics state...
+      </p>
+
+      <label style="display:flex;align-items:flex-start;gap:10px;color:#f4f4f4;font-size:13px;line-height:1.5;margin-bottom:14px;cursor:pointer;">
+        <input id="arm-safety-check" type="checkbox" onchange="updateArmConfirmationState()" style="margin-top:3px;accent-color:#f1c21b;">
+        <span>발사 책임자의 ARM 승인과 현장 안전 확인을 완료했습니다.</span>
+      </label>
+
+      <label for="arm-confirm-input" style="display:block;color:#c6c6c6;font-size:12px;margin-bottom:6px;">
+        확인을 위해 <strong style="color:#f1c21b;">ARM</strong>을 입력
+      </label>
+      <input id="arm-confirm-input" type="text" autocomplete="off" spellcheck="false"
+        oninput="updateArmConfirmationState()" placeholder="ARM" style="
+          width:100%;height:40px;box-sizing:border-box;background:#262626;
+          border:1px solid #6f6f6f;border-bottom:2px solid #f1c21b;
+          color:#f4f4f4;padding:0 12px;font-family:'IBM Plex Mono',monospace;
+          font-size:14px;text-transform:uppercase;
+        ">
+    </div>
+
+    <div style="display:flex;gap:1px;border-top:1px solid #393939;">
+      <button onclick="closeArmModal()" style="
+        flex:1;height:52px;background:#393939;border:none;color:#f4f4f4;
+        font-family:'IBM Plex Sans',sans-serif;font-size:14px;font-weight:600;cursor:pointer;
+      ">취소</button>
+      <button id="arm-confirm-btn" onclick="confirmArm()" disabled style="
+        flex:1;height:52px;background:#302400;border:1px solid #f1c21b;color:#f1c21b;
+        font-family:'IBM Plex Sans',sans-serif;font-size:14px;font-weight:700;
+        cursor:not-allowed;letter-spacing:0.06em;opacity:0.4;
+      ">SAFE → ARMED 전이</button>
+    </div>
+  </div>
+</div>
 
 <!-- ─── 낙하산 사출 경고 모달 (Carbon Modal) ─── -->
 <div id="eject-modal-overlay" onclick="closeEjectModal()" style="
@@ -2072,11 +2157,42 @@ function updateUI(row) {
 
   // ─ Flight Phase ─
   setPhaseUI(phase);
+  updateArmButton(isHardware ? Number(row.state_code) : phase);
 }
 
 function set(id, val) {
   const el = document.getElementById(id);
   if(el) el.textContent = val;
+}
+
+function updateArmButton(stateCode) {
+  const btn = document.getElementById('arm-btn');
+  if (!btn) return;
+  if (stateCode === 1) {
+    btn.disabled = false;
+    btn.textContent = 'SAFE → ARMED';
+    btn.style.background = '#302400';
+    btn.style.borderColor = '#f1c21b';
+    btn.style.color = '#f1c21b';
+    btn.style.opacity = '1';
+    btn.title = 'Open authenticated ARM confirmation';
+  } else if (stateCode === 2) {
+    btn.disabled = true;
+    btn.textContent = 'ARMED';
+    btn.style.background = '#0e3b1f';
+    btn.style.borderColor = '#24a148';
+    btn.style.color = '#42be65';
+    btn.style.opacity = '1';
+    btn.title = 'Avionics reports ARMED';
+  } else {
+    btn.disabled = true;
+    btn.textContent = 'ARM BLOCKED';
+    btn.style.background = '#262626';
+    btn.style.borderColor = '#6f6f6f';
+    btn.style.color = '#8d8d8d';
+    btn.style.opacity = '0.45';
+    btn.title = 'Latest flight state is not SAFE';
+  }
 }
 
 // ─────────────────────────────────────────────
@@ -2473,6 +2589,87 @@ function hideToast() {
 }
 
 // ─────────────────────────────────────────────
+//  SAFE -> ARMED
+let armStatusEligible = false;
+let armRequestInFlight = false;
+
+function updateArmConfirmationState() {
+  const check = document.getElementById('arm-safety-check');
+  const input = document.getElementById('arm-confirm-input');
+  const btn = document.getElementById('arm-confirm-btn');
+  const confirmed = check.checked && input.value.trim() === 'ARM';
+  btn.disabled = armRequestInFlight || !armStatusEligible || !confirmed;
+  btn.style.opacity = btn.disabled ? '0.4' : '1';
+  btn.style.cursor = btn.disabled ? 'not-allowed' : 'pointer';
+}
+
+async function openArmModal() {
+  armStatusEligible = false;
+  armRequestInFlight = false;
+  document.getElementById('arm-safety-check').checked = false;
+  document.getElementById('arm-confirm-input').value = '';
+  document.getElementById('arm-confirm-btn').textContent = 'SAFE → ARMED 전이';
+  document.getElementById('arm-status-line').textContent = 'Checking authenticated avionics state...';
+  document.getElementById('arm-modal-overlay').style.display = 'flex';
+  updateArmConfirmationState();
+
+  try {
+    const response = await fetch('/api/flight/arm/status', { cache: 'no-store' });
+    if (!response.ok) throw new Error('ARM status endpoint unavailable');
+    const status = await response.json();
+    armStatusEligible = status.eligible === true && Number(status.state_code) === 1;
+    const age = Number(status.last_fast_age_s);
+    document.getElementById('arm-status-line').textContent = armStatusEligible
+      ? `READY: authenticated SAFE telemetry (${Number.isFinite(age) ? age.toFixed(2) + 's old' : 'simulation'})`
+      : `BLOCKED: ${status.message || 'ARM prerequisites are not satisfied.'}`;
+  } catch (err) {
+    armStatusEligible = false;
+    document.getElementById('arm-status-line').textContent = `BLOCKED: ${err.message}`;
+  }
+  updateArmConfirmationState();
+}
+
+function closeArmModal() {
+  if (armRequestInFlight) return;
+  document.getElementById('arm-modal-overlay').style.display = 'none';
+}
+
+async function confirmArm() {
+  const btn = document.getElementById('arm-confirm-btn');
+  if (btn.disabled || armRequestInFlight) return;
+  armRequestInFlight = true;
+  btn.disabled = true;
+  btn.textContent = 'ARM 명령 전송 중...';
+  btn.style.opacity = '0.55';
+  document.getElementById('arm-status-line').textContent = 'Waiting for EXECUTED/OK + ARMED ACK...';
+
+  try {
+    const response = await fetch('/api/flight/arm', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ confirm: 'ARM', expected_state: 1 })
+    });
+    const data = await response.json();
+    if (!response.ok || data.success !== true || Number(data.flight_state) !== 2) {
+      throw new Error(data.message || 'ARM command was not confirmed');
+    }
+    armStatusEligible = false;
+    btn.textContent = 'ARMED ACK 수신';
+    document.getElementById('arm-status-line').textContent =
+      `CONFIRMED: EXECUTED/OK, state=ARMED, seq=${data.command_seq}`;
+    showToast('ARMED ACK confirmed', 'Verify continuing ARMED FAST telemetry.', true);
+    setTimeout(() => closeArmModal(), 2000);
+  } catch (err) {
+    armStatusEligible = false;
+    btn.textContent = 'SAFE → ARMED 전이';
+    document.getElementById('arm-status-line').textContent = `NOT CONFIRMED: ${err.message}`;
+    showToast('ARM not confirmed', err.message, true);
+  } finally {
+    armRequestInFlight = false;
+    updateArmConfirmationState();
+  }
+}
+
 //  낙하산 강제 사출
 // ─────────────────────────────────────────────
 async function openEjectModal() {

@@ -41,6 +41,9 @@ class MissionControlContractTest(unittest.TestCase):
         self.assertNotIn('cdnjs.cloudflare.com', HTML)
         self.assertNotIn('unpkg.com/leaflet', HTML)
 
+    def test_page_declares_an_inline_favicon(self):
+        self.assertIn('<link rel="icon" href="data:image/svg+xml,', HTML)
+
     def test_hardware_zero_altitude_does_not_auto_stop_stream(self):
         body = self._toggle_stream_body()
         self.assertIn("p.source === 'simulate' && p.alt <= 0 && p.ts > 30", body)
@@ -49,6 +52,19 @@ class MissionControlContractTest(unittest.TestCase):
         match = re.search(r"function resetAll\(\) \{(?P<body>.*?)\n\}", HTML, re.S)
         self.assertIsNotNone(match)
         self.assertIn("/api/telemetry/reset", match.group("body"))
+
+    def test_arm_controls_require_safe_state_and_two_operator_confirmations(self):
+        self.assertIn('id="arm-btn"', HTML)
+        self.assertIn('id="arm-safety-check"', HTML)
+        self.assertIn('id="arm-confirm-input"', HTML)
+        self.assertIn("check.checked && input.value.trim() === 'ARM'", HTML)
+        self.assertIn("status.eligible === true && Number(status.state_code) === 1", HTML)
+
+    def test_arm_request_requires_server_status_and_armed_ack(self):
+        self.assertIn("fetch('/api/flight/arm/status'", HTML)
+        self.assertIn("fetch('/api/flight/arm'", HTML)
+        self.assertIn("JSON.stringify({ confirm: 'ARM', expected_state: 1 })", HTML)
+        self.assertIn("Number(data.flight_state) !== 2", HTML)
 
 
 if __name__ == "__main__":

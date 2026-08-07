@@ -232,6 +232,20 @@ class PyroSafetyTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"NURA_AVIONICS_DOWNLINK_ONLY": "0"}):
             self.assertFalse(app.avionics_downlink_only())
 
+    def test_mixed_preprocessor_values_fail_closed_without_build_override(self):
+        constants = (
+            "#if defined(NURA_BENCH_ENABLE_UPLINK)\n"
+            "constexpr bool kFlightDownlinkOnly = false;\n"
+            "#else\n"
+            "constexpr bool kFlightDownlinkOnly = true;\n"
+            "#endif\n"
+        )
+        with mock.patch.dict(
+            os.environ,
+            {"NURA_AVIONICS_DOWNLINK_ONLY": "unknown"},
+        ), mock.patch("builtins.open", mock.mock_open(read_data=constants)):
+            self.assertTrue(app.avionics_downlink_only())
+
     def test_simulation_pyro_is_not_blocked_by_hardware_source_setting(self):
         original_uplink = app.uplink
         try:

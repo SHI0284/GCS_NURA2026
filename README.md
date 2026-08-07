@@ -19,11 +19,11 @@ flight.
 ## Structure
 
 ```text
-app.py                 Flask web server and PYRO API
+app.py                 Flask web server, ARM safety gate, and PYRO API
 desktop.py             Legacy/helper PyQt desktop GCS
 mission_control.html   Web mission-control UI
 protocol.py            NURA frame/protocol helpers
-uplink.py              Serial/LoRa PYRO uplink
+uplink.py              Authenticated Serial/LoRa command uplink
 firmware/              Teensy LoRa serial bridge
 logs/                  Flight logs
 ```
@@ -49,9 +49,9 @@ mission_control.html
 | Packet decoding | `protocol.py` verifies NURA V2 vehicle ID, direction, MAC, CRC, and payloads | authenticated telemetry/control frames |
 | Graphs | `mission_control.html` receives telemetry from `app.py` | Chart.js graphs |
 | Map | `mission_control.html` plots GPS telemetry | Leaflet map |
-| Frontend to backend | UI buttons call Flask APIs | `/api/telemetry/next`, `/api/pyro/deploy` |
+| Frontend to backend | UI buttons call Flask APIs | `/api/telemetry/next`, `/api/flight/arm`, `/api/pyro/deploy` |
 | Backend to frontend | `app.py` provides telemetry JSON | graph/map updates |
-| Uplink | `uplink.py` builds and sends PYRO commands | serial bytes to Teensy |
+| Uplink | `uplink.py` builds and sends authenticated ARM/PYRO commands | serial bytes to Teensy |
 | Hardware bridge | Teensy firmware forwards PC serial frames over LoRa | LoRa packet bridge |
 
 `desktop.py` is not the main ground station anymore. It is kept as a PyQt helper/legacy view. The main operator flow is the web UI served by `app.py`.
@@ -203,6 +203,35 @@ run_desktop_simulate.bat
 The web server serves `mission_control.html`. Its eject button calls `POST /api/pyro/deploy`, which uses the same `PyroUplink` code as the desktop GCS. An
 `EXECUTED` ACK confirms the avionics recovery execution path, not independent
 electrical continuity or physical parachute deployment feedback.
+
+## SAFE -> ARMED uplink
+
+Mission Control exposes a separate `SAFE -> ARMED` button. The modal requires
+both a safety-procedure checkbox and the exact text `ARM`. The browser sends:
+
+```http
+POST /api/flight/arm
+Content-Type: application/json
+
+{"confirm":"ARM","expected_state":1}
+```
+
+The server refuses to create or transmit the command unless the raw bridge is
+connected, the flight radio identity is provisioned, avionics uplink is enabled,
+the bridge radio is healthy, and authenticated FAST telemetry no older than 1.5
+seconds reports exactly `SAFE(1)`. The fixed CONTROL payload uses command ID
+`0x04`, `param0=SAFE(1)`, `param1=ARMED(2)`, and a non-zero 3-second avionics
+boot-clock expiry. Success requires `EXECUTED/OK` whose ACK state byte is
+`ARMED(2)`; `ACCEPTED` or an intermediate `DUPLICATE/SAFE` is not success.
+
+Inspect the current safety decision without transmitting:
+
+```bash
+curl http://127.0.0.1:8080/api/flight/arm/status
+```
+
+The matching avionics implementation contract and copy-paste agent prompt are
+in [`AVIONICS_ARM_UPLINK_HANDOFF_KR.md`](AVIONICS_ARM_UPLINK_HANDOFF_KR.md).
 
 When the adjacent avionics source reports `kFlightDownlinkOnly=true`, the Flask
 PYRO endpoint and confirmation button are intentionally blocked. The GCS does
